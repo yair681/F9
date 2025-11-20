@@ -9,7 +9,8 @@
     "lint": "eslint . --ext js,jsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview",
     "init-tailwind": "tailwindcss init -p",
-    "start": "serve -s dist" 
+    // התיקון לקוד ה-Bad Gateway: שימוש במשתנה הסביבה PORT
+    "start": "serve -s dist -l $PORT" 
   },
   "dependencies": {
     "firebase": "^10.12.3",
