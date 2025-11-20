@@ -8,13 +8,15 @@
     "build": "vite build",
     "lint": "eslint . --ext js,jsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview",
-    "init-tailwind": "tailwindcss init -p" 
+    "init-tailwind": "tailwindcss init -p",
+    "start": "serve -s dist" 
   },
   "dependencies": {
     "firebase": "^10.12.3",
     "lucide-react": "^0.381.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "serve": "^14.2.3"
   },
   "devDependencies": {
     "@types/react": "^18.3.3",
