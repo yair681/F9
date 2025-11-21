@@ -7,7 +7,8 @@ import {
   signInAnonymously, 
   onAuthStateChanged,
   signOut, 
-  createUserWithEmailAndPassword 
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword // יובא לצורך לוגין
 } from 'firebase/auth';
 import { 
   getFirestore,
@@ -42,10 +43,25 @@ import './index.css';
 
 
 // --- הגדרות קבועות ---
+
+// קונפיגורציה סטטית של Firebase (כברירת מחדל אם אין גלובלית)
+const STATIC_FIREBASE_CONFIG = {
+    apiKey: "AIzaSyBAe1m7AapkyxxDFfs6AkyYdjnpUMKSSOM",
+    authDomain: "pirhei-aharon.firebaseapp.com",
+    projectId: "pirhei-aharon",
+    storageBucket: "pirhei-aharon.firebasestorage.app",
+    messagingSenderId: "294755528900",
+    appId: "1:294755528900:web:caab9ed4e16f195db31991",
+};
+
 // גלובליות המסופקות על ידי הקנבס
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const canvasFirebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
 const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+// בחירת הקונפיגורציה: קונפיגורציית Canvas קודמת, אחרת סטטית
+const firebaseConfig = Object.keys(canvasFirebaseConfig).length > 0 ? canvasFirebaseConfig : STATIC_FIREBASE_CONFIG;
+
 
 // אתחול Firebase
 const app = initializeApp(firebaseConfig);
