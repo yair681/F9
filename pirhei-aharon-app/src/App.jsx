@@ -1,12 +1,11 @@
 import React, { useState, useEffect } from 'react';
-// ייבוא השירותים (auth, db) מהקובץ החדש שיצרנו
 import { auth, db, APP_ID_CUSTOM } from './firebaseConfig'; 
 
 import { 
   signInWithEmailAndPassword, 
   signOut, 
   onAuthStateChanged,
-  createUserWithEmailAndPassword // **חובה** ליצירת משתמשים חדשים ב-Auth
+  createUserWithEmailAndPassword 
 } from 'firebase/auth';
 import { 
   doc, 
@@ -17,7 +16,9 @@ import {
   getDocs, 
   setDoc,
   deleteDoc, 
-  onSnapshot
+  onSnapshot,
+  serverTimestamp,
+  addDoc
 } from 'firebase/firestore';
 import { 
   LayoutDashboard, 
@@ -29,14 +30,18 @@ import {
   Trash2,
   Lock,
   UserCheck,
-  Zap
+  Zap,
+  MessageSquare,
+  Send
 } from 'lucide-react';
 import './App.css';
 import './index.css';
 
 
-// נשתמש ב-APP_ID_CUSTOM במקום המשתנה המקומי
+// --- הגדרות קבועות ---
 const appId = APP_ID_CUSTOM;
+const SUPER_ADMIN_EMAIL = 'yairfrish2@gmail.com'; // המנהל הראשי הקבוע
+const SUPER_ADMIN_PASSWORD_DEFAULT = 'yair12345'; // סיסמת ברירת מחדל (לא בשימוש אוטומטי בהתחברות, רק ליצירה)
 
 // הגדרות תפקידים (Roles)
 const ROLES = {
@@ -45,11 +50,13 @@ const ROLES = {
     STUDENT: 'student',
 };
 
+// --- רכיבים בסיסיים ---
+
 // רכיב כפתור רגיל עם עיצוב משופר
 const Button = ({ children, onClick, className = '', disabled = false, type = 'button' }) => (
     <button
         onClick={onClick}
-        className={`flex items-center justify-center space-x-2 py-2 px-6 rounded-xl font-bold transition duration-300 ease-in-out transform hover:scale-[1.01] shadow-md hover:shadow-lg ${
+        className={`flex items-center justify-center space-x-2 py-3 px-6 rounded-xl font-bold text-lg transition duration-300 ease-in-out transform hover:scale-[1.01] shadow-lg hover:shadow-xl ${
             disabled 
                 ? 'bg-gray-300 text-gray-500 cursor-not-allowed shadow-inner' 
                 : 'bg-indigo-600 text-white hover:bg-indigo-700 active:bg-indigo-800'
@@ -70,20 +77,134 @@ const Card = ({ title, children, className = '' }) => (
 );
 
 
+// --- רכיב לוח ההודעות (School Bulletin) ---
+
+const SchoolMessages = ({ isAdmin, currentUser, db, appId }) => {
+    const [messages, setMessages] = useState([]);
+    const [newMessage, setNewMessage] = useState('');
+    const [feedback, setFeedback] = useState('');
+
+    const messagesCollectionRef = collection(db, "artifacts", appId, "public", "data", "schoolMessages");
+
+    // טעינת הודעות
+    useEffect(() => {
+        if (!db) return;
+
+        // שאילתה: טען את 10 ההודעות האחרונות לפי זמן יצירה
+        const q = query(messagesCollectionRef); 
+        
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const list = snapshot.docs
+                .map(doc => ({ 
+                    id: doc.id, 
+                    ...doc.data(),
+                    // הפיכת ה-timestamp לאובייקט Date
+                    timestamp: doc.data().timestamp ? doc.data().timestamp.toDate() : new Date()
+                }))
+                .sort((a, b) => b.timestamp - a.timestamp) // מיון מהחדש לישן
+                .slice(0, 10); // הצג רק 10 הודעות אחרונות
+            setMessages(list);
+        }, (error) => {
+            console.error("Error fetching school messages:", error);
+        });
+
+        return () => unsubscribe();
+    }, [db, appId]);
+
+    // פרסום הודעה חדשה (רק מנהל)
+    const handlePostMessage = async () => {
+        if (!isAdmin || !newMessage.trim()) return;
+
+        try {
+            await addDoc(messagesCollectionRef, {
+                text: newMessage.trim(),
+                timestamp: serverTimestamp(),
+                authorName: currentUser.name || 'מנהל ראשי',
+                authorId: currentUser.uid,
+            });
+            setNewMessage('');
+            setFeedback('✅ ההודעה פורסמה בהצלחה!');
+        } catch (error) {
+            setFeedback(`🛑 שגיאה בפרסום: ${error.message}`);
+        }
+    };
+
+    // מחיקת הודעה (רק מנהל)
+    const handleDeleteMessage = async (messageId) => {
+        if (!isAdmin) return;
+
+        try {
+            await deleteDoc(doc(messagesCollectionRef, messageId));
+            setFeedback('✅ ההודעה נמחקה בהצלחה.');
+        } catch (error) {
+            setFeedback(`🛑 שגיאה במחיקה: ${error.message}`);
+        }
+    };
+
+
+    return (
+        <Card title="לוח הודעות בית ספרי" className="min-h-[500px] border-indigo-300">
+            {isAdmin && (
+                <div className="mb-6 p-4 bg-gray-50 rounded-xl border border-gray-200">
+                    <textarea
+                        value={newMessage}
+                        onChange={(e) => setNewMessage(e.target.value)}
+                        placeholder="פרסם הודעה חדשה לבית הספר..."
+                        className="w-full p-3 border rounded-lg focus:ring-indigo-500 focus:border-indigo-500 min-h-[80px]"
+                    />
+                    <Button 
+                        onClick={handlePostMessage} 
+                        className="mt-3 w-full bg-green-600 hover:bg-green-700 text-sm"
+                        disabled={!newMessage.trim()}
+                    >
+                        <Send size={18} /> פרסם הודעה
+                    </Button>
+                    {feedback && <p className={`mt-2 text-xs font-bold ${feedback.startsWith('✅') ? 'text-green-600' : 'text-red-600'}`}>{feedback}</p>}
+                </div>
+            )}
+
+            <div className="space-y-4 max-h-96 overflow-y-auto">
+                {messages.length === 0 ? (
+                    <p className="text-gray-500 p-4 border rounded-xl text-center">אין הודעות חדשות כרגע.</p>
+                ) : (
+                    messages.map(msg => (
+                        <div key={msg.id} className="p-4 bg-indigo-50 rounded-xl shadow-sm border border-indigo-200 relative">
+                            <p className="text-gray-800 text-md whitespace-pre-wrap">{msg.text}</p>
+                            <div className="mt-2 text-xs text-gray-500 flex justify-between items-center pt-2 border-t border-indigo-100">
+                                <span className='font-semibold'>פורסם ע"י: {msg.authorName}</span>
+                                <span>{msg.timestamp.toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' })}</span>
+                            </div>
+                            {isAdmin && (
+                                <button 
+                                    onClick={() => handleDeleteMessage(msg.id)}
+                                    className="absolute top-2 left-2 p-1 text-red-500 hover:text-red-700 transition"
+                                >
+                                    <Trash2 size={16} />
+                                </button>
+                            )}
+                        </div>
+                    ))
+                )}
+            </div>
+        </Card>
+    );
+};
+
+
+// --- הרכיב הראשי של האפליקציה ---
+
 function App() {
   const [loading, setLoading] = useState(true);
   const [currentUser, setCurrentUser] = useState(null);
   const [loginEmail, setLoginEmail] = useState(''); 
   const [loginPassword, setLoginPassword] = useState(''); 
   const [loginMessage, setLoginMessage] = useState('');
-  const [superAdminEmail, setSuperAdminEmail] = useState('yairfrish2@gmail.com'); // **הגדרת ברירת המחדל המבוקשת**
-  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminEmail, setSuperAdminEmail] = useState(SUPER_ADMIN_EMAIL); 
+  const [superAdminPassword, setSuperAdminPassword] = useState(SUPER_ADMIN_PASSWORD_DEFAULT);
   const [registrationComplete, setRegistrationComplete] = useState(null); 
   
-  // --- סטייטים לנתוני האפליקציה ---
   const [teachers, setTeachers] = useState([]);
   const [students, setStudents] = useState([]);
-  const [classes, setClasses] = useState([]);
   const [view, setView] = useState('dashboard'); 
   const [authReady, setAuthReady] = useState(false); 
 
@@ -96,11 +217,9 @@ function App() {
             const userDoc = await getDoc(doc(db, "artifacts", appId, "public", "data", "users", user.uid));
             if (userDoc.exists()) {
                 const userData = userDoc.data();
-                // אם המשתמש מחובר ונתונים קיימים, טען אותו
                 setCurrentUser({ uid: user.uid, role: userData.role, email: userData.email, name: userData.name });
             } else {
-                // המשתמש מחובר ב-Auth, אבל חסר פרופיל Firestore.
-                // זהו משתמש "לא מאושר" (לא נוצר על ידי אדמין) או פרופיל שנמחק בטעות.
+                // המשתמש מחובר ב-Auth, אבל חסר פרופיל Firestore (משתמש לא מאושר)
                 console.warn(`⚠️ User ${user.uid} authenticated but Firestore profile is missing. Logging out for security.`);
                 await signOut(auth); // יציאה מיידית
                 setCurrentUser(null);
@@ -120,7 +239,7 @@ function App() {
   }, []);
 
 
-  // 2. בדיקה האם קיים Super Admin במערכת (לצורך ניווט)
+  // 2. בדיקה האם קיים Super Admin במערכת
   useEffect(() => {
     if (authReady && !currentUser) { 
         const checkSuperAdmin = async () => {
@@ -148,6 +267,10 @@ function App() {
 
   // 3. לוגיקת יצירת Super Admin (הרשמה ראשונית)
   const handleSuperAdminRegister = async () => {
+    if (superAdminEmail !== SUPER_ADMIN_EMAIL) {
+        setLoginMessage(`הרשמה ראשונית אפשרית רק עם האימייל: ${SUPER_ADMIN_EMAIL}`);
+        return;
+    }
     if (superAdminPassword.length < 6) {
         setLoginMessage("הסיסמה חייבת להיות לפחות 6 תווים.");
         return;
@@ -155,29 +278,27 @@ function App() {
     setLoading(true);
 
     try {
-      // יצירת המשתמש ב-Firebase Authentication
+      // 1. יצירת המשתמש ב-Firebase Authentication
       const userCredential = await createUserWithEmailAndPassword(auth, superAdminEmail, superAdminPassword); 
 
-      // יצירת מסמך המשתמש ב-Firestore עם תפקיד ADMIN
+      // 2. יצירת מסמך המשתמש ב-Firestore עם תפקיד ADMIN
       await setDoc(doc(db, "artifacts", appId, "public", "data", "users", userCredential.user.uid), {
         email: superAdminEmail,
         role: ROLES.ADMIN,
-        name: 'מנהל ראשי', 
+        name: 'המנהל הקבוע', 
         createdAt: new Date()
       });
 
-      setCurrentUser({ uid: userCredential.user.uid, role: ROLES.ADMIN, email: superAdminEmail, name: 'מנהל ראשי' });
+      setCurrentUser({ uid: userCredential.user.uid, role: ROLES.ADMIN, email: superAdminEmail, name: 'המנהל הקבוע' });
       setRegistrationComplete(true);
-      setLoginMessage('ההרשמה וההתחברות הצליחו!');
+      setLoginMessage('✅ המנהל הראשי נוצר והתחברת בהצלחה!');
 
     } catch (error) {
       console.error("🛑 Registration Error:", error);
       if (error.code === 'auth/email-already-in-use') {
-        setLoginMessage("אימייל זה כבר קיים. אנא נסה להתחבר במקום להירשם.");
-      } else if (error.code === 'auth/weak-password') {
-        setLoginMessage("סיסמה חלשה מדי. אנא השתמש בסיסמה של לפחות 6 תווים.");
+        setLoginMessage(`🛑 אימייל זה (${SUPER_ADMIN_EMAIL}) כבר רשום. אנא התחבר.`);
       } else {
-        setLoginMessage(`שגיאת הרשמה: ${error.message}`);
+        setLoginMessage(`🛑 שגיאת הרשמה: ${error.message}`);
       }
     } finally {
         setLoading(false);
@@ -185,7 +306,7 @@ function App() {
   };
 
 
-  // 4. לוגיקת ההתחברות
+  // 4. לוגיקת ההתחברות (בדיקת אישור מנהל)
   const handleLogin = async () => {
     if (!loginEmail.includes('@') || loginPassword.length < 6) {
         setLoginMessage('אנא הזן כתובת אימייל מלאה וסיסמה חוקית (6+ תווים).');
@@ -197,7 +318,6 @@ function App() {
     setLoading(true);
 
     try {
-      // שלב 1: אימות ב-Firebase Auth
       const userCredential = await signInWithEmailAndPassword(auth, loginEmail, loginPassword);
       const userId = userCredential.user.uid;
       
@@ -206,13 +326,9 @@ function App() {
 
       if (userDoc.exists()) {
         const userData = userDoc.data();
-        // הצלחה: המשתמש קיים ב-Auth וקיים לו פרופיל ב-Firestore (נוצר על ידי מנהל או בהרשמה הראשונית)
         setCurrentUser({ uid: userId, role: userData.role, email: userData.email, name: userData.name });
         setLoginMessage('');
       } else {
-        // כישלון אבטחה: המשתמש קיים ב-Auth (הצליח להתחבר), אך אין לו פרופיל ב-Firestore.
-        // זה אומר שהוא נרשם בדרך עקיפה ולא אושר על ידי מנהל.
-        console.warn(`⚠️ Security Breach: User ${userId} logged in via Auth but missing Firestore profile. Logging out.`);
         await signOut(auth);
         setLoginMessage('שגיאת אבטחה: משתמש זה אינו מאושר על ידי מנהל המערכת. פנה למנהל.');
         setCurrentUser(null);
@@ -223,7 +339,7 @@ function App() {
       setLoginPassword(''); 
 
       if (error.code === 'auth/invalid-credential' || error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password') {
-        setLoginMessage('אימייל או סיסמה שגויים. **וודא שהזנת כתובת אימייל מלאה!**');
+        setLoginMessage('אימייל או סיסמה שגויים. וודא שהזנת כתובת אימייל מלאה!');
       } else {
         setLoginMessage(`שגיאת התחברות: ${error.message}`);
       }
@@ -247,9 +363,7 @@ function App() {
 
   // 6. טעינת נתונים
   useEffect(() => {
-    // טעינת מורים ותלמידים מ-Firestore עם onSnapshot
     if (currentUser && currentUser.uid && db && appId && currentUser.role) {
-
         if (currentUser.role === ROLES.ADMIN || currentUser.role === ROLES.TEACHER) {
             const usersCollectionRef = collection(db, "artifacts", appId, "public", "data", "users");
 
@@ -304,16 +418,17 @@ function App() {
           <h2 className="text-3xl font-extrabold mb-8 text-indigo-800 flex items-center justify-center space-x-3">
              <Zap size={28}/> הרשמת מנהל-על
           </h2>
-          <p className="mb-6 text-md text-gray-600">
-             זהו המשתמש הראשון במערכת. אנא השתמש ב**כתובת אימייל מלאה** ובסיסמה חזקה.
+          <p className="mb-6 text-md text-gray-600 p-3 bg-yellow-50 rounded-lg">
+             יש להשתמש באימייל הקבוע: **{SUPER_ADMIN_EMAIL}**
           </p>
           <input
             type="email"
-            placeholder="אימייל מנהל (לדוגמה: yairfrish2@gmail.com)"
+            placeholder="אימייל מנהל"
             className="w-full p-4 mb-4 border border-gray-300 rounded-xl focus:outline-none focus:ring-4 focus:ring-indigo-100 text-left"
             value={superAdminEmail}
             onChange={(e) => setSuperAdminEmail(e.target.value)}
             dir="ltr"
+            readOnly={true} // האימייל נעול כדי לוודא שזה המנהל הקבוע
           />
           <input
             type="password"
@@ -329,50 +444,56 @@ function App() {
           >
             הרשם והתחבר כמנהל
           </Button>
-          {loginMessage && <p className="mt-5 text-sm text-red-500 font-bold bg-red-50 p-3 rounded-lg border border-red-300">{loginMessage}</p>}
+          {loginMessage && <p className="mt-5 text-sm font-bold bg-red-50 p-3 rounded-lg border border-red-300 text-red-700">{loginMessage}</p>}
         </div>
       </div>
     );
   }
 
-  // מסך 2: מסך התחברות
+  // מסך 2: מסך התחברות (כולל לוח הודעות בצד)
   if (!currentUser) {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-gray-50 bg-gradient-to-br from-green-50 to-white">
-        <div className="p-10 bg-white shadow-2xl rounded-2xl w-full max-w-lg text-center border-t-4 border-green-600">
-          <h2 className="text-3xl font-extrabold mb-8 text-green-800 flex items-center justify-center space-x-3">
-            <Lock size={28}/> כניסה למערכת
-          </h2>
-          
-          <p className="mb-6 text-sm text-gray-600 p-2 bg-blue-50 rounded-lg border border-blue-200">
-            רק משתמשים שנוצרו על ידי מנהל רשאים להיכנס.
-          </p>
+        <div className="flex min-h-screen bg-gray-50 bg-gradient-to-br from-blue-50 to-white">
+            <div className="flex-1 flex items-center justify-center p-10">
+                <div className="p-10 bg-white shadow-2xl rounded-2xl w-full max-w-lg text-center border-t-4 border-green-600">
+                    <h2 className="text-4xl font-black mb-8 text-green-800 flex items-center justify-center space-x-3">
+                        <Lock size={32}/> כניסה למערכת
+                    </h2>
+                    
+                    <p className="mb-6 text-sm text-gray-600 p-3 bg-blue-50 rounded-xl border border-blue-200">
+                        רק משתמשים שנוצרו ואושרו על ידי מנהל רשאים להיכנס.
+                    </p>
 
-          <input
-            type="email"
-            placeholder="אימייל מלא (חובה!)"
-            className="w-full p-4 mb-4 border border-gray-300 rounded-xl focus:outline-none focus:ring-4 focus:ring-green-100 text-left"
-            value={loginEmail}
-            onChange={(e) => setLoginEmail(e.target.value)}
-            dir="ltr"
-          />
-          <input
-            type="password"
-            placeholder="סיסמה"
-            className="w-full p-4 mb-8 border border-gray-300 rounded-xl focus:outline-none focus:ring-4 focus:ring-green-100"
-            value={loginPassword}
-            onChange={(e) => setLoginPassword(e.target.value)}
-          />
-          <Button
-            onClick={handleLogin}
-            className="w-full bg-green-600 hover:bg-green-700"
-            disabled={!loginEmail || !loginPassword}
-          >
-            התחבר
-          </Button>
-          {loginMessage && <p className="mt-5 text-sm text-red-500 font-bold bg-red-50 p-3 rounded-lg border border-red-300">{loginMessage}</p>}
+                    <input
+                        type="email"
+                        placeholder="אימייל מלא (חובה!)"
+                        className="w-full p-4 mb-4 border border-gray-300 rounded-xl focus:outline-none focus:ring-4 focus:ring-green-100 text-left"
+                        value={loginEmail}
+                        onChange={(e) => setLoginEmail(e.target.value)}
+                        dir="ltr"
+                    />
+                    <input
+                        type="password"
+                        placeholder="סיסמה"
+                        className="w-full p-4 mb-8 border border-gray-300 rounded-xl focus:outline-none focus:ring-4 focus:ring-green-100"
+                        value={loginPassword}
+                        onChange={(e) => setLoginPassword(e.target.value)}
+                    />
+                    <Button
+                        onClick={handleLogin}
+                        className="w-full bg-green-600 hover:bg-green-700"
+                        disabled={!loginEmail || !loginPassword}
+                    >
+                        התחבר
+                    </Button>
+                    {loginMessage && <p className="mt-5 text-sm font-bold bg-red-50 p-3 rounded-lg border border-red-300 text-red-700">{loginMessage}</p>}
+                </div>
+            </div>
+            {/* חלון הודעות בצד שמאל של מסך הכניסה */}
+            <div className="w-96 p-10 bg-gray-100 border-r border-gray-200 flex-shrink-0">
+                <SchoolMessages isAdmin={false} db={db} appId={appId} />
+            </div>
         </div>
-      </div>
     );
   }
 
@@ -389,6 +510,7 @@ function App() {
         {/* קישורי ניווט */}
         <div className="space-y-3 w-full">
             <NavItem icon={LayoutDashboard} label="דאשבורד" currentView={view} target="dashboard" setView={setView} />
+            <NavItem icon={MessageSquare} label="הודעות ביה" currentView={view} target="messages" setView={setView} />
             {currentUser.role === ROLES.ADMIN && (
                 <>
                     <NavItem icon={Users} label="ניהול משתמשים" currentView={view} target="users" setView={setView} />
@@ -402,7 +524,7 @@ function App() {
         <div className="mt-auto w-full pt-8 border-t border-gray-100">
             <button
                 onClick={handleLogout}
-                className="flex items-center space-x-3 w-full p-3 font-semibold rounded-xl transition duration-200 text-red-600 hover:bg-red-50 hover:shadow-inner"
+                className="flex items-center space-x-3 w-full p-4 font-extrabold rounded-xl transition duration-200 text-red-600 hover:bg-red-50 hover:shadow-inner"
             >
                 <LogOut size={20} />
                 <span>התנתק</span>
@@ -422,6 +544,7 @@ function App() {
                 view === 'dashboard' ? 'דאשבורד ראשי' :
                 view === 'users' ? 'ניהול משתמשים' :
                 view === 'classes' ? 'ניהול כיתות' :
+                view === 'messages' ? 'לוח הודעות בית ספרי' :
                 view === 'profile' ? 'הפרופיל שלי' : 'עמוד לא נמצא'
             }
           </h1>
@@ -431,9 +554,10 @@ function App() {
         </header>
 
         {/* תוכן לפי View */}
-        {view === 'dashboard' && <DashboardView currentUser={currentUser} teachers={teachers} students={students} classes={classes} />}
-        {view === 'users' && currentUser.role === ROLES.ADMIN && <AdminUsersView students={students} teachers={teachers} appId={appId} db={db} />}
-        {view === 'classes' && currentUser.role === ROLES.ADMIN && <AdminClassesView teachers={teachers} students={students} classes={classes} appId={appId} db={db} />}
+        {view === 'dashboard' && <DashboardView currentUser={currentUser} teachers={teachers} students={students} />}
+        {view === 'messages' && <SchoolMessages isAdmin={currentUser.role === ROLES.ADMIN} currentUser={currentUser} db={db} appId={appId} />}
+        {view === 'users' && currentUser.role === ROLES.ADMIN && <AdminUsersView students={students} teachers={teachers} appId={appId} db={db} currentUser={currentUser} />}
+        {view === 'classes' && currentUser.role === ROLES.ADMIN && <AdminClassesView teachers={teachers} students={students} classes={[]} appId={appId} db={db} />}
         {view === 'profile' && <Card title="הנתונים שלי"><p>פרטים אישיים יופיעו כאן.</p></Card>}
 
       </main>
@@ -457,17 +581,17 @@ const NavItem = ({ icon: Icon, label, currentView, target, setView }) => (
 );
 
 
-// רכיבי View (לצורך הדגמה)
-const DashboardView = ({ currentUser, teachers, students, classes }) => (
+// רכיבי View
+const DashboardView = ({ currentUser, teachers, students }) => (
     <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-        <Card title="סה״כ מורים" className="bg-blue-50 border-blue-200">
+        <Card title="מורים" className="bg-blue-50 border-blue-200">
             <p className="text-5xl font-black text-blue-700">{teachers.length}</p>
         </Card>
-        <Card title="סה״כ תלמידים" className="bg-green-50 border-green-200">
+        <Card title="תלמידים" className="bg-green-50 border-green-200">
             <p className="text-5xl font-black text-green-700">{students.length}</p>
         </Card>
-        <Card title="סה״כ כיתות" className="bg-yellow-50 border-yellow-200">
-            <p className="text-5xl font-black text-yellow-700">{classes.length}</p>
+        <Card title="הודעות חדשות" className="bg-yellow-50 border-yellow-200">
+            <p className="text-5xl font-black text-yellow-700">...</p>
         </Card>
         <Card title={`שלום, ${currentUser.name || 'משתמש'}`} className="md:col-span-3 bg-gray-50">
             <p className="text-gray-600">
@@ -478,14 +602,14 @@ const DashboardView = ({ currentUser, teachers, students, classes }) => (
     </div>
 );
 
-const AdminUsersView = ({ students, teachers, appId, db }) => {
+const AdminUsersView = ({ students, teachers, appId, db, currentUser }) => {
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [name, setName] = useState('');
     const [role, setRole] = useState(ROLES.STUDENT);
     const [feedback, setFeedback] = useState('');
 
-    // **פונקציה מתוקנת ליצירת משתמש**
+    // יצירת משתמש
     const handleCreateUser = async () => {
         if (!email || !password || !name) {
             setFeedback("יש למלא את כל השדות.");
@@ -503,19 +627,20 @@ const AdminUsersView = ({ students, teachers, appId, db }) => {
             const userCredential = await createUserWithEmailAndPassword(auth, email, password);
             const userId = userCredential.user.uid;
             
-            // 2. יצירת פרופיל ב-Firestore עם התפקיד המבוקש
+            // 2. יצירת פרופיל ב-Firestore
             await setDoc(doc(db, "artifacts", appId, "public", "data", "users", userId), {
                 email: email,
                 role: role,
                 name: name,
-                createdAt: new Date(),
+                createdAt: serverTimestamp(),
+                createdBy: currentUser.email
             });
 
             setFeedback(`✅ משתמש ${name} נוצר בהצלחה עם תפקיד ${role}.`);
             setEmail('');
             setPassword('');
             setName('');
-            setRole(ROLES.STUDENT); // איפוס
+            setRole(ROLES.STUDENT); 
         } catch (error) {
             console.error("Error creating user:", error);
             if (error.code === 'auth/email-already-in-use') {
@@ -527,12 +652,18 @@ const AdminUsersView = ({ students, teachers, appId, db }) => {
     };
 
 
-    const handleDeleteUser = async (userId) => {
-        setFeedback('במערכת מלאה, היינו צריכים למחוק גם את משתמש ה-Auth שלו. כאן, נמחוק רק את פרופיל ה-Firestore. אנא היכנס למסך ה-Auth כדי למחוק את המשתמש לצמיתות.');
+    const handleDeleteUser = async (userToDelete) => {
+        // מניעת מחיקה של המנהל הראשי הקבוע
+        if (userToDelete.email === SUPER_ADMIN_EMAIL) {
+            setFeedback('🛑 לא ניתן למחוק את משתמש המנהל הראשי הקבוע!');
+            return;
+        }
+
+        setFeedback(`⚠️ משתמש ${userToDelete.name} ימחק מ-Firestore. מחיקת משתמש ה-Auth שלו דורשת כניסה למסך ה-Auth של Firebase.`);
         // מחיקת המשתמש מ-Firestore
         try {
-            await deleteDoc(doc(db, "artifacts", appId, "public", "data", "users", userId));
-            setFeedback(`✅ פרופיל משתמש ${userId.substring(0, 8)} נמחק בהצלחה מ-Firestore.`);
+            await deleteDoc(doc(db, "artifacts", appId, "public", "data", "users", userToDelete.id));
+            setFeedback(`✅ פרופיל משתמש ${userToDelete.name} נמחק בהצלחה מ-Firestore.`);
         } catch (error) {
             setFeedback(`🛑 שגיאה במחיקת משתמש: ${error.message}`);
         }
@@ -542,10 +673,10 @@ const AdminUsersView = ({ students, teachers, appId, db }) => {
         <div className="space-y-10">
             <Card title="הוספת משתמש חדש" className="bg-indigo-50 border-indigo-200">
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
-                    <input type="text" placeholder="שם מלא" value={name} onChange={(e) => setName(e.target.value)} className="p-3 border rounded-lg focus:ring-indigo-500 focus:border-indigo-500" />
-                    <input type="email" placeholder="אימייל" value={email} onChange={(e) => setEmail(e.target.value)} className="p-3 border rounded-lg focus:ring-indigo-500 focus:border-indigo-500" dir="ltr" />
-                    <input type="password" placeholder="סיסמה (6+ תווים)" value={password} onChange={(e) => setPassword(e.target.value)} className="p-3 border rounded-lg focus:ring-indigo-500 focus:border-indigo-500" />
-                    <select value={role} onChange={(e) => setRole(e.target.value)} className="p-3 border rounded-lg focus:ring-indigo-500 focus:border-indigo-500">
+                    <input type="text" placeholder="שם מלא" value={name} onChange={(e) => setName(e.target.value)} className="p-3 border rounded-xl focus:ring-indigo-500 focus:border-indigo-500" />
+                    <input type="email" placeholder="אימייל" value={email} onChange={(e) => setEmail(e.target.value)} className="p-3 border rounded-xl focus:ring-indigo-500 focus:border-indigo-500" dir="ltr" />
+                    <input type="password" placeholder="סיסמה (6+ תווים)" value={password} onChange={(e) => setPassword(e.target.value)} className="p-3 border rounded-xl focus:ring-indigo-500 focus:border-indigo-500" />
+                    <select value={role} onChange={(e) => setRole(e.target.value)} className="p-3 border rounded-xl focus:ring-indigo-500 focus:border-indigo-500">
                         <option value={ROLES.STUDENT}>תלמיד</option>
                         <option value={ROLES.TEACHER}>מורה</option>
                         <option value={ROLES.ADMIN}>מנהל</option>
@@ -558,22 +689,25 @@ const AdminUsersView = ({ students, teachers, appId, db }) => {
             </Card>
 
             <Card title="רשימת משתמשים פעילים">
-                <h3 className="text-xl font-bold mt-6 mb-4 text-indigo-700">מורים ({teachers.length})</h3>
-                <UserList users={teachers} onDelete={handleDeleteUser} />
+                <h3 className="text-xl font-bold mt-6 mb-4 text-indigo-700">מנהל ({teachers.filter(t => t.role === ROLES.ADMIN).length + students.filter(s => s.role === ROLES.ADMIN).length + (currentUser.role === ROLES.ADMIN ? 1 : 0)})</h3>
+                <UserList users={teachers.filter(t => t.role === ROLES.ADMIN).concat(students.filter(s => s.role === ROLES.ADMIN)).filter(u => u.email !== SUPER_ADMIN_EMAIL)} onDelete={handleDeleteUser} superAdminEmail={SUPER_ADMIN_EMAIL} />
+                
+                <h3 className="text-xl font-bold mt-8 mb-4 text-indigo-700">מורים ({teachers.length})</h3>
+                <UserList users={teachers.filter(t => t.role === ROLES.TEACHER)} onDelete={handleDeleteUser} superAdminEmail={SUPER_ADMIN_EMAIL} />
                 
                 <h3 className="text-xl font-bold mt-8 mb-4 text-indigo-700">תלמידים ({students.length})</h3>
-                <UserList users={students} onDelete={handleDeleteUser} />
+                <UserList users={students.filter(s => s.role === ROLES.STUDENT)} onDelete={handleDeleteUser} superAdminEmail={SUPER_ADMIN_EMAIL} />
             </Card>
         </div>
     );
 };
 
-const UserList = ({ users, onDelete }) => (
+const UserList = ({ users, onDelete, superAdminEmail }) => (
     <ul className="space-y-3">
         {users.map(user => (
-            <li key={user.id} className="flex justify-between items-center p-4 bg-gray-50 rounded-xl border border-gray-200 shadow-sm transition hover:shadow-md">
+            <li key={user.id} className={`flex justify-between items-center p-4 rounded-xl border border-gray-200 shadow-sm transition hover:shadow-md ${user.email === superAdminEmail ? 'bg-yellow-100' : 'bg-gray-50'}`}>
                 <div className="flex flex-col text-right">
-                    <p className="font-semibold text-gray-800">{user.name}</p>
+                    <p className="font-semibold text-gray-800">{user.name} {user.email === superAdminEmail && '(מנהל ראשי קבוע)'}</p>
                     <p className="text-sm text-gray-500" dir="ltr">({user.email})</p>
                 </div>
                 <div className='flex items-center space-x-4'>
@@ -586,8 +720,10 @@ const UserList = ({ users, onDelete }) => (
                         {user.role === ROLES.ADMIN ? 'מנהל' : user.role === ROLES.TEACHER ? 'מורה' : 'תלמיד'}
                     </span>
                     <button 
-                        onClick={() => onDelete(user.id)} 
-                        className="bg-red-500 text-white p-2 rounded-full hover:bg-red-600 transition duration-200 shadow-md"
+                        onClick={() => onDelete(user)} 
+                        className={`text-white p-2 rounded-full transition duration-200 shadow-md ${user.email === superAdminEmail ? 'bg-gray-400 cursor-not-allowed' : 'bg-red-500 hover:bg-red-600'}`}
+                        disabled={user.email === superAdminEmail}
+                        title={user.email === superAdminEmail ? 'לא ניתן למחוק את המנהל הראשי' : 'מחק משתמש'}
                     >
                         <Trash2 size={16} />
                     </button>
