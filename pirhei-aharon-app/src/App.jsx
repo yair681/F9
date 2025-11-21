@@ -1,13 +1,16 @@
 import React, { useState, useEffect } from 'react';
-import { auth, db, APP_ID_CUSTOM } from './firebaseConfig'; 
-
+// ייבוא קונפיגורציה בסיסית ורכיבי Firebase
+import { initializeApp } from 'firebase/app';
 import { 
-  signInWithEmailAndPassword, 
-  signOut, 
+  getAuth, 
+  signInWithCustomToken, 
+  signInAnonymously, 
   onAuthStateChanged,
+  signOut, 
   createUserWithEmailAndPassword 
 } from 'firebase/auth';
 import { 
+  getFirestore,
   doc, 
   getDoc, 
   query, 
@@ -39,9 +42,18 @@ import './index.css';
 
 
 // --- הגדרות קבועות ---
-const appId = APP_ID_CUSTOM;
+// גלובליות המסופקות על ידי הקנבס
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+// אתחול Firebase
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
 const SUPER_ADMIN_EMAIL = 'yairfrish2@gmail.com'; // המנהל הראשי הקבוע
-const SUPER_ADMIN_PASSWORD_DEFAULT = 'yair12345'; // סיסמת ברירת מחדל (לא בשימוש אוטומטי בהתחברות, רק ליצירה)
+const SUPER_ADMIN_PASSWORD_DEFAULT = 'yair12345'; // סיסמת ברירת מחדל (הערה: אינה מאמתת אוטומטית)
 
 // הגדרות תפקידים (Roles)
 const ROLES = {
@@ -49,6 +61,7 @@ const ROLES = {
     TEACHER: 'teacher',
     STUDENT: 'student',
 };
+
 
 // --- רכיבים בסיסיים ---
 
@@ -84,10 +97,12 @@ const SchoolMessages = ({ isAdmin, currentUser, db, appId }) => {
     const [newMessage, setNewMessage] = useState('');
     const [feedback, setFeedback] = useState('');
 
+    // נתיב ציבורי גלובלי
     const messagesCollectionRef = collection(db, "artifacts", appId, "public", "data", "schoolMessages");
 
     // טעינת הודעות
     useEffect(() => {
+        // אם אין db או אם המערכת עדיין לא עברה אימות ראשוני, יוצאים.
         if (!db) return;
 
         // שאילתה: טען את 10 ההודעות האחרונות לפי זמן יצירה
@@ -105,6 +120,8 @@ const SchoolMessages = ({ isAdmin, currentUser, db, appId }) => {
                 .slice(0, 10); // הצג רק 10 הודעות אחרונות
             setMessages(list);
         }, (error) => {
+            // זה המקום בו הופיעה שגיאת ההרשאות - היא תופיע אם המשתמש לא מחובר
+            // כאשר נשתמש ב-signInAnonymously זה יפתור את הבעיה עבור קריאה ציבורית
             console.error("Error fetching school messages:", error);
         });
 
@@ -199,7 +216,7 @@ function App() {
   const [loginEmail, setLoginEmail] = useState(''); 
   const [loginPassword, setLoginPassword] = useState(''); 
   const [loginMessage, setLoginMessage] = useState('');
-  const [superAdminEmail, setSuperAdminEmail] = useState(SUPER_ADMIN_EMAIL); 
+  const [superAdminEmail] = useState(SUPER_ADMIN_EMAIL); 
   const [superAdminPassword, setSuperAdminPassword] = useState(SUPER_ADMIN_PASSWORD_DEFAULT);
   const [registrationComplete, setRegistrationComplete] = useState(null); 
   
@@ -209,41 +226,74 @@ function App() {
   const [authReady, setAuthReady] = useState(false); 
 
 
-  // 1. בדיקת סטטוס אימות המשתמש הנוכחי
+  // 1. אתחול אימות (Auth) - מנסה להתחבר עם טוקן קנבס או אנונימי
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      if (user) {
+    const initializeAuth = async () => {
         try {
-            const userDoc = await getDoc(doc(db, "artifacts", appId, "public", "data", "users", user.uid));
-            if (userDoc.exists()) {
-                const userData = userDoc.data();
-                setCurrentUser({ uid: user.uid, role: userData.role, email: userData.email, name: userData.name });
+            // נסה להתחבר עם הטוקן המותאם אישית של הקנבס
+            if (initialAuthToken) {
+                await signInWithCustomToken(auth, initialAuthToken);
             } else {
-                // המשתמש מחובר ב-Auth, אבל חסר פרופיל Firestore (משתמש לא מאושר)
-                console.warn(`⚠️ User ${user.uid} authenticated but Firestore profile is missing. Logging out for security.`);
-                await signOut(auth); // יציאה מיידית
-                setCurrentUser(null);
-                setLoginMessage('התחברת עם משתמש שלא נוצר על ידי מנהל המערכת. אנא פנה למנהל.');
+                // אם אין טוקן (או אם נכשל), התחבר כאנונימי כדי לקבל UID עבור כללי האבטחה
+                await signInAnonymously(auth);
             }
-        } catch(error) {
-             console.error("Error fetching user data after auth:", error);
-             setCurrentUser(null);
+        } catch (error) {
+            console.error("🛑 Failed to use initial auth token or sign in anonymously. User will be logged out.", error);
+            // אם הכל נכשל, נצא בכל מקרה וניתן ל-onAuthStateChanged לטפל בזה
         }
-      } else {
-        setCurrentUser(null);
-      }
-      setAuthReady(true);
-      setLoading(false);
-    });
-    return () => unsubscribe();
-  }, []);
+        
+        // עכשיו שהמשתמש מאומת (אנונימי או עם טוקן), ניתן להפעיל את ה-onAuthStateChanged
+        const unsubscribe = onAuthStateChanged(auth, async (user) => {
+            setAuthReady(true);
+            
+            if (user && !user.isAnonymous) { // משתמש מחובר (לא אנונימי)
+                try {
+                    const userDoc = await getDoc(doc(db, "artifacts", appId, "public", "data", "users", user.uid));
+                    
+                    if (userDoc.exists()) {
+                        const userData = userDoc.data();
+                        setCurrentUser({ uid: user.uid, role: userData.role, email: userData.email, name: userData.name });
+                        
+                        // אם זה המנהל הראשי (שנוצר דרך הקוד), נגדיר לו שם קבוע
+                        if (userData.email === SUPER_ADMIN_EMAIL && !userData.name) {
+                            setCurrentUser(prev => ({ ...prev, name: 'המנהל הקבוע' }));
+                            // עדכון חד פעמי ב-Firestore אם השם חסר
+                            await setDoc(doc(db, "artifacts", appId, "public", "data", "users", user.uid), { name: 'המנהל הקבוע' }, { merge: true });
+                        }
+
+                    } else {
+                        // המשתמש מחובר ב-Auth, אבל חסר פרופיל Firestore (משתמש לא מאושר)
+                        // זה יקרה אם משתמש נרשם מחוץ לאפליקציה (שזה נכון לקנבס), לכן נחסום אותו
+                        console.warn(`⚠️ User ${user.uid} authenticated but Firestore profile is missing. Logging out for security.`);
+                        await signOut(auth); // יציאה מיידית
+                        setCurrentUser(null);
+                        setLoginMessage('התחברת עם משתמש שלא נוצר על ידי מנהל המערכת. אנא פנה למנהל.');
+                    }
+                } catch(error) {
+                    console.error("Error fetching user data after auth:", error);
+                    setCurrentUser(null);
+                }
+            } else {
+                // משתמש אנונימי או מנותק - מנקה משתמש
+                setCurrentUser(null);
+            }
+            setLoading(false);
+        });
+
+        return () => unsubscribe();
+    };
+
+    initializeAuth();
+  }, []); // רץ פעם אחת בטעינת הקומפוננטה
 
 
   // 2. בדיקה האם קיים Super Admin במערכת
   useEffect(() => {
+    // רץ רק אם ה-Auth מוכן ואין משתמש מחובר (משתמש אנונימי/מנותק)
     if (authReady && !currentUser) { 
         const checkSuperAdmin = async () => {
           try {
+            // ה-Query הזה הוא אחד ממקורות שגיאות ההרשאות - הוא צריך להתבצע רק אחרי שהמשתמש מאומת (אנונימי לפחות)
             const q = query(collection(db, "artifacts", appId, "public", "data", "users"), where("role", "==", ROLES.ADMIN));
             const querySnapshot = await getDocs(q);
 
@@ -253,8 +303,10 @@ function App() {
               setRegistrationComplete(true); // יש אדמין, הצג לוגין
             }
           } catch (error) {
-            console.error("Error checking super admin. Assuming registration is complete.", error);
-            setRegistrationComplete(true);
+            console.error("🛑 Error checking super admin. Assuming registration is complete.", error);
+            // אם יש שגיאת הרשאה כאן, כנראה שהאימות האנונימי לא עבד או כללי האבטחה נוקשים מדי.
+            // במקרה של שגיאה, נניח שההרשמה הושלמה כדי לא לחסום את המשתמש
+            setRegistrationComplete(true); 
           }
         };
 
@@ -285,8 +337,8 @@ function App() {
       await setDoc(doc(db, "artifacts", appId, "public", "data", "users", userCredential.user.uid), {
         email: superAdminEmail,
         role: ROLES.ADMIN,
-        name: 'המנהל הקבוע', 
-        createdAt: new Date()
+        name: 'המנהל הקבוע', // שם קבוע
+        createdAt: serverTimestamp()
       });
 
       setCurrentUser({ uid: userCredential.user.uid, role: ROLES.ADMIN, email: superAdminEmail, name: 'המנהל הקבוע' });
@@ -318,17 +370,19 @@ function App() {
     setLoading(true);
 
     try {
+      // שלב 1: התחברות באמצעות Auth
       const userCredential = await signInWithEmailAndPassword(auth, loginEmail, loginPassword);
       const userId = userCredential.user.uid;
       
       // שלב 2: בדיקת פרופיל Firestore (בדיקת "מאושר" על ידי מנהל)
+      // אם אין מסמך Firestore, המשתמש לא נוצר דרך האפליקציה וייחסם ב-onAuthStateChanged
       const userDoc = await getDoc(doc(db, "artifacts", appId, "public", "data", "users", userId));
 
       if (userDoc.exists()) {
-        const userData = userDoc.data();
-        setCurrentUser({ uid: userId, role: userData.role, email: userData.email, name: userData.name });
+        // ה-onAuthStateChanged יטפל כעת בהגדרת currentUser
         setLoginMessage('');
       } else {
+        // אם המשתמש מחובר אבל אין לו מסמך, נתנתק
         await signOut(auth);
         setLoginMessage('שגיאת אבטחה: משתמש זה אינו מאושר על ידי מנהל המערכת. פנה למנהל.');
         setCurrentUser(null);
@@ -351,12 +405,14 @@ function App() {
 
 
   // 5. לוגיקת יציאה (Logout)
-  const handleLogout = () => {
-    signOut(auth);
+  const handleLogout = async () => {
+    // חשוב: לאחר יציאה, אנחנו נכנסים מחדש כאנונימיים כדי לשמור על הרשאות קריאה ציבוריות
+    await signOut(auth);
+    await signInAnonymously(auth); 
     setCurrentUser(null);
     setLoginEmail('');
     setLoginPassword('');
-    setLoginMessage('התנתקת בהצלחה.');
+    setLoginMessage('התנתקת בהצלחה. אתה עדיין יכול לצפות בהודעות הבית ספריות.');
     setView('dashboard'); 
   };
 
@@ -393,7 +449,7 @@ function App() {
         setTeachers([]);
         setStudents([]);
     }
-  }, [currentUser]);
+  }, [currentUser, authReady]);
 
 
   // 7. רכיבי Render
@@ -426,7 +482,6 @@ function App() {
             placeholder="אימייל מנהל"
             className="w-full p-4 mb-4 border border-gray-300 rounded-xl focus:outline-none focus:ring-4 focus:ring-indigo-100 text-left"
             value={superAdminEmail}
-            onChange={(e) => setSuperAdminEmail(e.target.value)}
             dir="ltr"
             readOnly={true} // האימייל נעול כדי לוודא שזה המנהל הקבוע
           />
@@ -491,6 +546,7 @@ function App() {
             </div>
             {/* חלון הודעות בצד שמאל של מסך הכניסה */}
             <div className="w-96 p-10 bg-gray-100 border-r border-gray-200 flex-shrink-0">
+                {/* SchoolMessages עדיין פועל מכיוון שהתחברנו כאנונימיים */}
                 <SchoolMessages isAdmin={false} db={db} appId={appId} />
             </div>
         </div>
@@ -659,7 +715,10 @@ const AdminUsersView = ({ students, teachers, appId, db, currentUser }) => {
             return;
         }
 
-        setFeedback(`⚠️ משתמש ${userToDelete.name} ימחק מ-Firestore. מחיקת משתמש ה-Auth שלו דורשת כניסה למסך ה-Auth של Firebase.`);
+        // אזהרה: מחיקת משתמש ה-Auth שלו דורשת שימוש ב-Admin SDK.
+        // מכיוון שאנחנו ב-Frontend, אנחנו רק מוחקים את פרופיל ה-Firestore.
+        setFeedback(`⚠️ משתמש ${userToDelete.name} ימחק מ-Firestore. (יש למחוק ידנית מ-Firebase Auth).`);
+        
         // מחיקת המשתמש מ-Firestore
         try {
             await deleteDoc(doc(db, "artifacts", appId, "public", "data", "users", userToDelete.id));
@@ -689,8 +748,9 @@ const AdminUsersView = ({ students, teachers, appId, db, currentUser }) => {
             </Card>
 
             <Card title="רשימת משתמשים פעילים">
-                <h3 className="text-xl font-bold mt-6 mb-4 text-indigo-700">מנהל ({teachers.filter(t => t.role === ROLES.ADMIN).length + students.filter(s => s.role === ROLES.ADMIN).length + (currentUser.role === ROLES.ADMIN ? 1 : 0)})</h3>
-                <UserList users={teachers.filter(t => t.role === ROLES.ADMIN).concat(students.filter(s => s.role === ROLES.ADMIN)).filter(u => u.email !== SUPER_ADMIN_EMAIL)} onDelete={handleDeleteUser} superAdminEmail={SUPER_ADMIN_EMAIL} />
+                {/* הצגת המנהל הראשי */}
+                <h3 className="text-xl font-bold mt-6 mb-4 text-indigo-700">מנהל ראשי ({SUPER_ADMIN_EMAIL}) <span className='text-red-500 text-sm'>(בלתי ניתן למחיקה)</span></h3>
+                <UserList users={[{ id: 'fixed', email: SUPER_ADMIN_EMAIL, name: 'המנהל הקבוע', role: ROLES.ADMIN }]} onDelete={handleDeleteUser} superAdminEmail={SUPER_ADMIN_EMAIL} />
                 
                 <h3 className="text-xl font-bold mt-8 mb-4 text-indigo-700">מורים ({teachers.length})</h3>
                 <UserList users={teachers.filter(t => t.role === ROLES.TEACHER)} onDelete={handleDeleteUser} superAdminEmail={SUPER_ADMIN_EMAIL} />
@@ -707,7 +767,7 @@ const UserList = ({ users, onDelete, superAdminEmail }) => (
         {users.map(user => (
             <li key={user.id} className={`flex justify-between items-center p-4 rounded-xl border border-gray-200 shadow-sm transition hover:shadow-md ${user.email === superAdminEmail ? 'bg-yellow-100' : 'bg-gray-50'}`}>
                 <div className="flex flex-col text-right">
-                    <p className="font-semibold text-gray-800">{user.name} {user.email === superAdminEmail && '(מנהל ראשי קבוע)'}</p>
+                    <p className="font-semibold text-gray-800">{user.name}</p>
                     <p className="text-sm text-gray-500" dir="ltr">({user.email})</p>
                 </div>
                 <div className='flex items-center space-x-4'>
