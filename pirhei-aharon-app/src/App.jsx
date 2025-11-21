@@ -15,7 +15,8 @@ import {
   where, 
   getDocs, 
   setDoc,
-  deleteDoc // הוספת deleteDoc ל-AdminUsersView
+  deleteDoc, 
+  onSnapshot // <-- ***תיקון 1: ייבוא onSnapshot החסר***
 } from 'firebase/firestore';
 import { 
   LayoutDashboard, 
@@ -23,7 +24,7 @@ import {
   BookOpen, 
   LogOut, 
   Plus,
-  Flower // <-- הוספת איקון Flower
+  Flower 
 } from 'lucide-react';
 import './App.css';
 import './index.css';
@@ -72,13 +73,14 @@ function App() {
   const [loginMessage, setLoginMessage] = useState('');
   const [superAdminEmail, setSuperAdminEmail] = useState('');
   const [superAdminPassword, setSuperAdminPassword] = useState('');
-  const [registrationComplete, setRegistrationComplete] = useState(true); // משתנה זה יקבע אם יש Admin רשום
+  const [registrationComplete, setRegistrationComplete] = useState(true); 
   
   // --- סטייטים לנתוני האפליקציה ---
   const [teachers, setTeachers] = useState([]);
   const [students, setStudents] = useState([]);
   const [classes, setClasses] = useState([]);
   const [view, setView] = useState('dashboard'); // ניווט פנימי
+  const [authReady, setAuthReady] = useState(false); // מצב האם Auth מוכן (עבר בדיקה ראשונית)
 
 
   // 1. בדיקת סטטוס אימות המשתמש הנוכחי
@@ -86,22 +88,24 @@ function App() {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (user) {
         // המשתמש מחובר ב-Firebase Auth
-        const userDoc = await getDoc(doc(db, "artifacts", appId, "public", "data", "users", user.uid));
-        if (userDoc.exists()) {
-          const userData = userDoc.data();
-          setCurrentUser({ uid: user.uid, role: userData.role, email: userData.email, name: userData.name });
-        } else {
-          // המשתמש נמצא ב-Auth אך אין לו נתונים ב-Firestore (כנראה נמחק)
-          // לא נבצע signOut כאן - ניתן ל-handleLogin או ללוגיקת ההרשמה להתמודד עם זה.
-          // אם מגיע לכאן, זה אומר שהיוזר כבר מחובר, פשוט הנתונים חסרים.
-          // נגדיר current user חלקי ונציג הודעת שגיאה.
-          console.warn(`⚠️ User ${user.uid} authenticated but Firestore profile is missing during initial check.`);
-          setCurrentUser({ uid: user.uid, role: null, email: user.email || 'N/A', name: 'פרופיל חסר' });
-          setLoginMessage('התחברת, אך הפרופיל שלך ב-Firestore חסר. אנא התחבר מחדש או פנה למנהל.');
+        try {
+            const userDoc = await getDoc(doc(db, "artifacts", appId, "public", "data", "users", user.uid));
+            if (userDoc.exists()) {
+                const userData = userDoc.data();
+                setCurrentUser({ uid: user.uid, role: userData.role, email: userData.email, name: userData.name });
+            } else {
+                // נתונים חסרים, נשמור את היוזר החלקי
+                setCurrentUser({ uid: user.uid, role: null, email: user.email || 'N/A', name: 'פרופיל חסר' });
+                // אין צורך לצאת מהמערכת, נמשיך למסך לוגין/תיקון
+            }
+        } catch(error) {
+             console.error("Error fetching user data after auth:", error);
+             setCurrentUser(null);
         }
       } else {
         setCurrentUser(null);
       }
+      setAuthReady(true); // סימון ש-Auth מוכן
       setLoading(false);
     });
     return () => unsubscribe();
@@ -110,8 +114,12 @@ function App() {
 
   // 2. בדיקה האם קיים Super Admin במערכת (לצורך ניווט)
   useEffect(() => {
+    // ***תיקון 2: בדיקה זו חייבת להתבצע רק לאחר ש-Auth מוכן ואין משתמש מחובר***
     const checkSuperAdmin = async () => {
       try {
+        // לצורך בדיקה ראשונית זו, עלינו לוודא שכללי האבטחה מאפשרים קריאה לא מאומתת:
+        // אם כללי האבטחה לא מאפשרים זאת, הבדיקה תיכשל. 
+        // אנו מניחים שצריך להתקיים *לפחות* משתמש אחד. אם אין, נפתח את מסך ההרשמה.
         const q = query(collection(db, "artifacts", appId, "public", "data", "users"), where("role", "==", ROLES.ADMIN));
         const querySnapshot = await getDocs(q);
 
@@ -121,14 +129,21 @@ function App() {
           setRegistrationComplete(true); // יש אדמין, הצג לוגין
         }
       } catch (error) {
-        console.error("Error checking super admin:", error);
+        // אם השגיאה היא Permission Denied, נניח שיש אדמין כדי למנוע חשיפת נתונים לא מאומתת
+        // ומכריחים את המשתמש לעבור דרך מסך הלוגין.
+        if (error.code === 'permission-denied' || error.message.includes('Missing or insufficient permissions')) {
+            console.warn("Permission denied for initial check. Assuming registration is complete. Please check Firestore Security Rules.");
+            setRegistrationComplete(true);
+        } else {
+            console.error("Error checking super admin:", error);
+        }
       }
     };
 
-    if (!currentUser && loading === false) {
+    if (authReady && !currentUser) { // בצע בדיקה רק אם Auth מוכן ואין משתמש
         checkSuperAdmin();
     }
-  }, [currentUser, loading]);
+  }, [currentUser, authReady]); // תלוי ב-currentUser וב-authReady
 
 
   // 3. לוגיקת יצירת Super Admin (הרשמה ראשונית)
@@ -181,37 +196,37 @@ function App() {
 
     try {
       const userCredential = await signInWithEmailAndPassword(auth, loginEmail, loginPassword);
+      const userId = userCredential.user.uid;
       
-      const userDoc = await getDoc(doc(db, "artifacts", appId, "public", "data", "users", userCredential.user.uid));
+      const userDoc = await getDoc(doc(db, "artifacts", appId, "public", "data", "users", userId));
 
       if (userDoc.exists()) {
         const userData = userDoc.data();
         // 🚀 SUCCESS LOG
         console.log('✅ Login Successful! User Role:', userData.role);
 
-        setCurrentUser({ uid: userCredential.user.uid, role: userData.role, email: userData.email, name: userData.name });
+        setCurrentUser({ uid: userId, role: userData.role, email: userData.email, name: userData.name });
         setLoginMessage('');
       } else {
         // 🛑 תיקון השגיאה: יצירת פרופיל משתמש בסיסי ב-Firestore אם הוא נמצא ב-Auth אך הנתונים חסרים.
         const newUserEmail = userCredential.user.email || loginEmail;
-        // ניסיון לקבל שם כלשהו מהאימייל (לפני ה-@)
         const newUserName = newUserEmail.split('@')[0]; 
 
-        console.warn(`⚠️ Firestore profile missing for user ${userCredential.user.uid}. Auto-provisioning as ${ROLES.STUDENT}.`);
+        console.warn(`⚠️ Firestore profile missing for user ${userId}. Auto-provisioning as ${ROLES.STUDENT}.`);
         
         const newUserData = {
             email: newUserEmail,
             role: ROLES.STUDENT, // ברירת מחדל לתלמיד
             name: newUserName,
             createdAt: new Date(),
-            provisioned: true // סימון שיצירה אוטומטית
+            provisioned: true
         };
         
-        await setDoc(doc(db, "artifacts", appId, "public", "data", "users", userCredential.user.uid), newUserData);
+        // יצירת המסמך החסר
+        await setDoc(doc(db, "artifacts", appId, "public", "data", "users", userId), newUserData);
 
-        setCurrentUser({ uid: userCredential.user.uid, ...newUserData });
+        setCurrentUser({ uid: userId, ...newUserData });
         setLoginMessage('פרופיל המשתמש שלך נוצר מחדש כברירת מחדל. אנא פנה למנהל המערכת לשינוי תפקיד.');
-        // End Fix
       }
     } catch (error) {
       // 🛑 שלב 2: DEBUG - הצגת קוד השגיאה המדויק
@@ -245,7 +260,10 @@ function App() {
   // 6. טעינת נתונים (לצורך הדגמה)
   useEffect(() => {
     // טעינת מורים ותלמידים מ-Firestore עם onSnapshot
-    if (currentUser && db && appId) {
+    if (currentUser && currentUser.uid && db && appId) {
+        // ודא שהתפקיד ידוע לפני הטעינה כדי למנוע שגיאות הרשאה נוספות
+        if (!currentUser.role) return; 
+
         const qTeachers = query(collection(db, "artifacts", appId, "public", "data", "users"), where("role", "==", ROLES.TEACHER));
         const qStudents = query(collection(db, "artifacts", appId, "public", "data", "users"), where("role", "==", ROLES.STUDENT));
         
@@ -272,7 +290,8 @@ function App() {
 
   // 7. רכיבי Render
 
-  if (loading) {
+  // הצג טעינה עד ש-Auth מוכן ואין משתמש
+  if (loading || (!authReady && !currentUser)) { 
     return (
         <div className="flex items-center justify-center min-h-screen bg-gray-100">
             <div className="text-center p-8 bg-white shadow-lg rounded-lg">
@@ -316,12 +335,25 @@ function App() {
     );
   }
 
-  // מסך 2: מסך התחברות
-  if (!currentUser) {
+  // מסך 2: מסך התחברות (כולל מצב שבו יש משתמש מחובר אבל פרופיל חסר)
+  if (!currentUser || !currentUser.role) {
+    // אם יש currentUser אבל אין לו role, זה מצב של "משתמש אותנטי אך נתונים חסרים".
+    // במצב כזה, נציג מסך התחברות עם הודעת שגיאה ברורה, ונאפשר לוגין חוזר (שייצר את הפרופיל).
+    
+    // אם אין currentUser (כלומר null), זה מסך לוגין רגיל.
+    const isProfileMissing = currentUser && !currentUser.role;
+    
     return (
       <div className="flex items-center justify-center min-h-screen bg-gray-100">
         <div className="p-8 bg-white shadow-lg rounded-lg w-full max-w-md text-center">
           <h2 className="text-2xl font-bold mb-6 text-green-600">כניסה למערכת</h2>
+          
+          {isProfileMissing && (
+             <p className="mb-4 p-2 bg-yellow-100 text-yellow-700 rounded-lg border border-yellow-300">
+                התחברת, אך נתוני הפרופיל שלך חסרים. אנא התחבר שוב כדי לתקן או פנה למנהל.
+             </p>
+          )}
+
           <input
             type="email"
             placeholder="אימייל"
@@ -354,7 +386,7 @@ function App() {
       {/* סרגל ניווט צדדי */}
       <nav className="w-64 bg-white shadow-lg p-6 flex flex-col items-center border-l">
         <div className="flex items-center space-x-2 mb-10 text-indigo-700">
-            <Flower size={32} /> {/* האיקון Flower שחזר */}
+            <Flower size={32} /> 
             <span className="text-2xl font-bold">פרחי אהרון</span>
         </div>
         
