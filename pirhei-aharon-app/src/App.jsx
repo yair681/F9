@@ -136,8 +136,6 @@ const SchoolMessages = ({ isAdmin, currentUser, db, appId }) => {
                 .slice(0, 10); // הצג רק 10 הודעות אחרונות
             setMessages(list);
         }, (error) => {
-            // זה המקום בו הופיעה שגיאת ההרשאות - היא תופיע אם המשתמש לא מחובר
-            // כאשר נשתמש ב-signInAnonymously זה יפתור את הבעיה עבור קריאה ציבורית
             console.error("Error fetching school messages:", error);
         });
 
@@ -240,6 +238,8 @@ function App() {
   const [students, setStudents] = useState([]);
   const [view, setView] = useState('dashboard'); 
   const [authReady, setAuthReady] = useState(false); 
+  // הוספת סטייט חדש: האם המנהל הראשי קיים במערכת Auth (ללא קשר ל-Firestore)
+  const [isSuperAdminAuthRegistered, setIsSuperAdminAuthRegistered] = useState(false);
 
 
   // 1. אתחול אימות (Auth) - מנסה להתחבר עם טוקן קנבס או אנונימי
@@ -255,33 +255,28 @@ function App() {
             }
         } catch (error) {
             console.error("🛑 Failed to use initial auth token or sign in anonymously. User will be logged out.", error);
-            // אם הכל נכשל, נצא בכל מקרה וניתן ל-onAuthStateChanged לטפל בזה
         }
         
-        // עכשיו שהמשתמש מאומת (אנונימי או עם טוקן), ניתן להפעיל את ה-onAuthStateChanged
         const unsubscribe = onAuthStateChanged(auth, async (user) => {
             setAuthReady(true);
             
             if (user && !user.isAnonymous) { // משתמש מחובר (לא אנונימי)
                 try {
-                    const userDoc = await getDoc(doc(db, "artifacts", appId, "public", "data", "users", user.uid));
+                    const userDocRef = doc(db, "artifacts", appId, "public", "data", "users", user.uid);
+                    const userDoc = await getDoc(userDocRef);
                     
                     if (userDoc.exists()) {
                         const userData = userDoc.data();
                         setCurrentUser({ uid: user.uid, role: userData.role, email: userData.email, name: userData.name });
                         
-                        // אם זה המנהל הראשי (שנוצר דרך הקוד), נגדיר לו שם קבוע
                         if (userData.email === SUPER_ADMIN_EMAIL && !userData.name) {
                             setCurrentUser(prev => ({ ...prev, name: 'המנהל הקבוע' }));
-                            // עדכון חד פעמי ב-Firestore אם השם חסר
-                            await setDoc(doc(db, "artifacts", appId, "public", "data", "users", user.uid), { name: 'המנהל הקבוע' }, { merge: true });
+                            await setDoc(userDocRef, { name: 'המנהל הקבוע' }, { merge: true });
                         }
 
                     } else {
-                        // המשתמש מחובר ב-Auth, אבל חסר פרופיל Firestore (משתמש לא מאושר)
-                        // זה יקרה אם משתמש נרשם מחוץ לאפליקציה (שזה נכון לקנבס), לכן נחסום אותו
                         console.warn(`⚠️ User ${user.uid} authenticated but Firestore profile is missing. Logging out for security.`);
-                        await signOut(auth); // יציאה מיידית
+                        await signOut(auth);
                         setCurrentUser(null);
                         setLoginMessage('התחברת עם משתמש שלא נוצר על ידי מנהל המערכת. אנא פנה למנהל.');
                     }
@@ -303,25 +298,43 @@ function App() {
   }, []); // רץ פעם אחת בטעינת הקומפוננטה
 
 
-  // 2. בדיקה האם קיים Super Admin במערכת
+  // 2. בדיקה האם קיים Super Admin במערכת (בדיקה משופרת)
   useEffect(() => {
-    // רץ רק אם ה-Auth מוכן ואין משתמש מחובר (משתמש אנונימי/מנותק)
     if (authReady && !currentUser) { 
         const checkSuperAdmin = async () => {
           try {
-            // ה-Query הזה הוא אחד ממקורות שגיאות ההרשאות - הוא צריך להתבצע רק אחרי שהמשתמש מאומת (אנונימי לפחות)
+            // בדיקה 1: האם קיים פרופיל אדמין ב-Firestore
             const q = query(collection(db, "artifacts", appId, "public", "data", "users"), where("role", "==", ROLES.ADMIN));
             const querySnapshot = await getDocs(q);
 
-            if (querySnapshot.empty) {
-              setRegistrationComplete(false); // אין אדמין, פתח הרשמה
+            if (!querySnapshot.empty) {
+                // אם נמצא אדמין ב-Firestore, ההרשמה הושלמה
+                setRegistrationComplete(true);
             } else {
-              setRegistrationComplete(true); // יש אדמין, הצג לוגין
+                // אם אין אדמין ב-Firestore, ננסה לבדוק אם המנהל הראשי כבר רשום ב-Auth
+                try {
+                    // ניסיון להתחברות זמנית לבדיקה בלבד
+                    const tempAuth = await signInWithEmailAndPassword(auth, SUPER_ADMIN_EMAIL, SUPER_ADMIN_PASSWORD_DEFAULT);
+                    // אם הצלחנו להתחבר, המשתמש קיים ב-Auth
+                    setIsSuperAdminAuthRegistered(true);
+                    setRegistrationComplete(false); // יאפשר כפתור מעבר ללוגין
+                    await signOut(auth); // התנתקות מיידית מהחיבור הזמני
+                    await signInAnonymously(auth); // חזרה למצב אנונימי
+                } catch (error) {
+                    // אם נכשל (auth/user-not-found או auth/wrong-password), המשתמש לא רשום ב-Auth
+                    if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password' || error.code === 'auth/invalid-credential') {
+                        setIsSuperAdminAuthRegistered(false);
+                        setRegistrationComplete(false); // הצג מסך הרשמה
+                    } else {
+                         // שגיאות אחרות (כגון שגיאת API key או שגיאת רשת)
+                        console.error("🛑 Error during temporary Auth check. Assuming registration is needed.", error);
+                        setRegistrationComplete(false);
+                    }
+                }
             }
           } catch (error) {
-            console.error("🛑 Error checking super admin. Assuming registration is complete.", error);
-            // אם יש שגיאת הרשאה כאן, כנראה שהאימות האנונימי לא עבד או כללי האבטחה נוקשים מדי.
-            // במקרה של שגיאה, נניח שההרשמה הושלמה כדי לא לחסום את המשתמש
+            console.error("🛑 Error checking super admin. Assuming registration is complete to prevent security breach.", error);
+            // במקרה של שגיאת הרשאה כאן (שעלולה לקרות), נניח שההרשמה הושלמה כדי לחסום הרשמה מיותרת
             setRegistrationComplete(true); 
           }
         };
@@ -363,8 +376,11 @@ function App() {
 
     } catch (error) {
       console.error("🛑 Registration Error:", error);
+      
       if (error.code === 'auth/email-already-in-use') {
-        setLoginMessage(`🛑 אימייל זה (${SUPER_ADMIN_EMAIL}) כבר רשום. אנא התחבר.`);
+        setLoginMessage(`🛑 אימייל זה (${SUPER_ADMIN_EMAIL}) כבר רשום במערכת Auth. אנא התחבר. (הטקסט יסיר את עצמו).`);
+        // אם האימייל קיים, אנחנו יודעים שזה המנהל, ולכן ניתן לעבור ללוגין
+        setIsSuperAdminAuthRegistered(true); 
       } else {
         setLoginMessage(`🛑 שגיאת הרשמה: ${error.message}`);
       }
@@ -391,7 +407,6 @@ function App() {
       const userId = userCredential.user.uid;
       
       // שלב 2: בדיקת פרופיל Firestore (בדיקת "מאושר" על ידי מנהל)
-      // אם אין מסמך Firestore, המשתמש לא נוצר דרך האפליקציה וייחסם ב-onAuthStateChanged
       const userDoc = await getDoc(doc(db, "artifacts", appId, "public", "data", "users", userId));
 
       if (userDoc.exists()) {
@@ -400,6 +415,7 @@ function App() {
       } else {
         // אם המשתמש מחובר אבל אין לו מסמך, נתנתק
         await signOut(auth);
+        await signInAnonymously(auth); 
         setLoginMessage('שגיאת אבטחה: משתמש זה אינו מאושר על ידי מנהל המערכת. פנה למנהל.');
         setCurrentUser(null);
       }
@@ -422,7 +438,6 @@ function App() {
 
   // 5. לוגיקת יציאה (Logout)
   const handleLogout = async () => {
-    // חשוב: לאחר יציאה, אנחנו נכנסים מחדש כאנונימיים כדי לשמור על הרשאות קריאה ציבוריות
     await signOut(auth);
     await signInAnonymously(auth); 
     setCurrentUser(null);
@@ -482,40 +497,58 @@ function App() {
     );
   }
 
-  // מסך 1: הרשמת Super Admin ראשונה
+  // מסך 1: הרשמת Super Admin ראשונה (או מעבר ללוגין)
   if (registrationComplete === false && !currentUser) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-gray-50 bg-gradient-to-br from-indigo-100 to-white">
         <div className="p-10 bg-white shadow-2xl rounded-2xl w-full max-w-lg text-center border-t-4 border-indigo-600">
           <h2 className="text-3xl font-extrabold mb-8 text-indigo-800 flex items-center justify-center space-x-3">
-             <Zap size={28}/> הרשמת מנהל-על
+             <Zap size={28}/> הרשמת מנהל-על ראשונית
           </h2>
-          <p className="mb-6 text-md text-gray-600 p-3 bg-yellow-50 rounded-lg">
-             יש להשתמש באימייל הקבוע: **{SUPER_ADMIN_EMAIL}**
-          </p>
-          <input
-            type="email"
-            placeholder="אימייל מנהל"
-            className="w-full p-4 mb-4 border border-gray-300 rounded-xl focus:outline-none focus:ring-4 focus:ring-indigo-100 text-left"
-            value={superAdminEmail}
-            dir="ltr"
-            readOnly={true} // האימייל נעול כדי לוודא שזה המנהל הקבוע
-          />
-          <input
-            type="password"
-            placeholder="סיסמה (לפחות 6 תווים)"
-            className="w-full p-4 mb-8 border border-gray-300 rounded-xl focus:outline-none focus:ring-4 focus:ring-indigo-100"
-            value={superAdminPassword}
-            onChange={(e) => setSuperAdminPassword(e.target.value)}
-          />
-          <Button
-            onClick={handleSuperAdminRegister}
-            className="w-full bg-green-600 hover:bg-green-700"
-            disabled={!superAdminEmail || !superAdminPassword}
-          >
-            הרשם והתחבר כמנהל
-          </Button>
-          {loginMessage && <p className="mt-5 text-sm font-bold bg-red-50 p-3 rounded-lg border border-red-300 text-red-700">{loginMessage}</p>}
+          
+          {/* אם המשתמש קיים ב-Auth אבל חסר ב-Firestore (כנראה שנמחק או לא נוצר נכון), נאפשר לוגין */}
+          {isSuperAdminAuthRegistered ? (
+            <div className="text-center">
+                <p className="mb-6 text-md text-gray-700 p-4 bg-yellow-100 rounded-lg border border-yellow-300">
+                    <span className='font-bold text-lg'>✅ המנהל הראשי כבר רשום.</span> <br/>
+                    <span className='text-sm'>כעת עליך להתחבר כדי ליצור את פרופיל ה-Firestore שלו.</span>
+                </p>
+                <Button onClick={() => setRegistrationComplete(true)} className="w-full bg-green-600 hover:bg-green-700">
+                    <Lock size={18}/> עבור למסך התחברות
+                </Button>
+                {loginMessage && <p className="mt-5 text-sm font-bold bg-red-50 p-3 rounded-lg border border-red-300 text-red-700">{loginMessage}</p>}
+            </div>
+          ) : (
+            // אם המשתמש לא קיים ב-Auth, נאפשר הרשמה
+            <>
+                <p className="mb-6 text-md text-gray-600 p-3 bg-yellow-50 rounded-lg">
+                    הקמת המערכת: יש להשתמש באימייל הקבוע: **{SUPER_ADMIN_EMAIL}**
+                </p>
+                <input
+                    type="email"
+                    placeholder="אימייל מנהל"
+                    className="w-full p-4 mb-4 border border-gray-300 rounded-xl focus:outline-none focus:ring-4 focus:ring-indigo-100 text-left"
+                    value={superAdminEmail}
+                    dir="ltr"
+                    readOnly={true}
+                />
+                <input
+                    type="password"
+                    placeholder="סיסמה (לפחות 6 תווים)"
+                    className="w-full p-4 mb-8 border border-gray-300 rounded-xl focus:outline-none focus:ring-4 focus:ring-indigo-100"
+                    value={superAdminPassword}
+                    onChange={(e) => setSuperAdminPassword(e.target.value)}
+                />
+                <Button
+                    onClick={handleSuperAdminRegister}
+                    className="w-full bg-green-600 hover:bg-green-700"
+                    disabled={!superAdminEmail || !superAdminPassword}
+                >
+                    הרשם והתחבר כמנהל
+                </Button>
+                {loginMessage && <p className="mt-5 text-sm font-bold bg-red-50 p-3 rounded-lg border border-red-300 text-red-700">{loginMessage}</p>}
+            </>
+          )}
         </div>
       </div>
     );
@@ -562,7 +595,6 @@ function App() {
             </div>
             {/* חלון הודעות בצד שמאל של מסך הכניסה */}
             <div className="w-96 p-10 bg-gray-100 border-r border-gray-200 flex-shrink-0">
-                {/* SchoolMessages עדיין פועל מכיוון שהתחברנו כאנונימיים */}
                 <SchoolMessages isAdmin={false} db={db} appId={appId} />
             </div>
         </div>
