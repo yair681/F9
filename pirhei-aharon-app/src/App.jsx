@@ -14,14 +14,16 @@ import {
   collection, 
   where, 
   getDocs, 
-  setDoc
+  setDoc,
+  deleteDoc // הוספת deleteDoc ל-AdminUsersView
 } from 'firebase/firestore';
 import { 
   LayoutDashboard, 
   Users, 
   BookOpen, 
   LogOut, 
-  Plus
+  Plus,
+  Flower // <-- הוספת איקון Flower
 } from 'lucide-react';
 import './App.css';
 import './index.css';
@@ -90,8 +92,12 @@ function App() {
           setCurrentUser({ uid: user.uid, role: userData.role, email: userData.email, name: userData.name });
         } else {
           // המשתמש נמצא ב-Auth אך אין לו נתונים ב-Firestore (כנראה נמחק)
-          await signOut(auth);
-          setCurrentUser(null);
+          // לא נבצע signOut כאן - ניתן ל-handleLogin או ללוגיקת ההרשמה להתמודד עם זה.
+          // אם מגיע לכאן, זה אומר שהיוזר כבר מחובר, פשוט הנתונים חסרים.
+          // נגדיר current user חלקי ונציג הודעת שגיאה.
+          console.warn(`⚠️ User ${user.uid} authenticated but Firestore profile is missing during initial check.`);
+          setCurrentUser({ uid: user.uid, role: null, email: user.email || 'N/A', name: 'פרופיל חסר' });
+          setLoginMessage('התחברת, אך הפרופיל שלך ב-Firestore חסר. אנא התחבר מחדש או פנה למנהל.');
         }
       } else {
         setCurrentUser(null);
@@ -134,7 +140,8 @@ function App() {
     setLoading(true);
 
     try {
-      const userCredential = await signInWithEmailAndPassword(auth, superAdminEmail, superAdminPassword); // שימוש בסיסמה זמנית, ניתן להשתמש גם ב-createUserWithEmailAndPassword
+      // שימוש ב-signInWithEmailAndPassword כפתרון זמני לרישום והתחברות
+      const userCredential = await signInWithEmailAndPassword(auth, superAdminEmail, superAdminPassword); 
 
       // יצירת מסמך המשתמש ב-Firestore
       await setDoc(doc(db, "artifacts", appId, "public", "data", "users", userCredential.user.uid), {
@@ -185,9 +192,26 @@ function App() {
         setCurrentUser({ uid: userCredential.user.uid, role: userData.role, email: userData.email, name: userData.name });
         setLoginMessage('');
       } else {
-        // אם המשתמש נמצא ב-Authentication אך לא ב-Firestore
-        setLoginMessage("משתמש אותנטי אך נתונים חסרים (כנראה נמחק)."); 
-        signOut(auth);
+        // 🛑 תיקון השגיאה: יצירת פרופיל משתמש בסיסי ב-Firestore אם הוא נמצא ב-Auth אך הנתונים חסרים.
+        const newUserEmail = userCredential.user.email || loginEmail;
+        // ניסיון לקבל שם כלשהו מהאימייל (לפני ה-@)
+        const newUserName = newUserEmail.split('@')[0]; 
+
+        console.warn(`⚠️ Firestore profile missing for user ${userCredential.user.uid}. Auto-provisioning as ${ROLES.STUDENT}.`);
+        
+        const newUserData = {
+            email: newUserEmail,
+            role: ROLES.STUDENT, // ברירת מחדל לתלמיד
+            name: newUserName,
+            createdAt: new Date(),
+            provisioned: true // סימון שיצירה אוטומטית
+        };
+        
+        await setDoc(doc(db, "artifacts", appId, "public", "data", "users", userCredential.user.uid), newUserData);
+
+        setCurrentUser({ uid: userCredential.user.uid, ...newUserData });
+        setLoginMessage('פרופיל המשתמש שלך נוצר מחדש כברירת מחדל. אנא פנה למנהל המערכת לשינוי תפקיד.');
+        // End Fix
       }
     } catch (error) {
       // 🛑 שלב 2: DEBUG - הצגת קוד השגיאה המדויק
@@ -221,7 +245,7 @@ function App() {
   // 6. טעינת נתונים (לצורך הדגמה)
   useEffect(() => {
     // טעינת מורים ותלמידים מ-Firestore עם onSnapshot
-    if (currentUser) {
+    if (currentUser && db && appId) {
         const qTeachers = query(collection(db, "artifacts", appId, "public", "data", "users"), where("role", "==", ROLES.TEACHER));
         const qStudents = query(collection(db, "artifacts", appId, "public", "data", "users"), where("role", "==", ROLES.STUDENT));
         
@@ -330,7 +354,7 @@ function App() {
       {/* סרגל ניווט צדדי */}
       <nav className="w-64 bg-white shadow-lg p-6 flex flex-col items-center border-l">
         <div className="flex items-center space-x-2 mb-10 text-indigo-700">
-            <Flower size={32} />
+            <Flower size={32} /> {/* האיקון Flower שחזר */}
             <span className="text-2xl font-bold">פרחי אהרון</span>
         </div>
         
@@ -355,7 +379,7 @@ function App() {
                 <LogOut size={20} />
                 <span>התנתק</span>
             </button>
-            <p className="mt-2 text-xs text-gray-400 text-center">מחובר כ: {currentUser.email} ({currentUser.uid.substring(0, 6)}...)</p>
+            <p className="mt-2 text-xs text-gray-400 text-center">מחובר כ: {currentUser.email} ({currentUser.uid ? currentUser.uid.substring(0, 6) : 'N/A'}...)</p>
         </div>
       </nav>
 
@@ -371,7 +395,7 @@ function App() {
             }
           </h1>
           <p className="text-gray-500 mt-1">
-            ברוך הבא, {currentUser.role === ROLES.ADMIN ? 'מנהל' : currentUser.role === ROLES.TEACHER ? 'מורה' : 'תלמיד'}!
+            ברוך הבא, {currentUser.role === ROLES.ADMIN ? 'מנהל' : currentUser.role === ROLES.TEACHER ? 'מורה' : currentUser.role === ROLES.STUDENT ? 'תלמיד' : 'אורח'}!
           </p>
         </header>
 
@@ -414,8 +438,8 @@ const DashboardView = ({ currentUser, teachers, students, classes }) => (
         <Card title="סה״כ כיתות" className="bg-yellow-50">
             <p className="text-4xl font-extrabold text-yellow-700">{classes.length}</p>
         </Card>
-        <Card title={`ברוך הבא, ${currentUser.name}`} className="md:col-span-3">
-            <p className="text-gray-600">זהו הדאשבורד הראשי של המערכת. התוכן יוצג כאן בהתאם לתפקידך ({currentUser.role}).</p>
+        <Card title={`ברוך הבא, ${currentUser.name || 'משתמש'}`} className="md:col-span-3">
+            <p className="text-gray-600">זהו הדאשבורד הראשי של המערכת. התוכן יוצג כאן בהתאם לתפקידך ({currentUser.role || 'Unknown'}).</p>
         </Card>
     </div>
 );
